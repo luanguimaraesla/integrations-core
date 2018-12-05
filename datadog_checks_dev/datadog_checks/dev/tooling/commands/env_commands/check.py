@@ -1,6 +1,8 @@
 # (C) Datadog, Inc. 2018
 # All rights reserved
 # Licensed under a 3-clause BSD style license (see LICENSE)
+from copy import deepcopy
+
 import click
 
 from ..utils import CONTEXT_SETTINGS, abort, echo_failure, echo_info, echo_success
@@ -15,7 +17,8 @@ from ...e2e import create_interface, get_configured_envs
 @click.argument('check')
 @click.argument('env', required=False)
 @click.option('--rate', '-r', is_flag=True)
-def check_run(check, env, rate):
+@click.option('--debug/--debug-after', default=None, help='Enter pdb at the start or end of the check run')
+def check_run(check, env, rate, debug):
     """Run an Agent check."""
     envs = get_configured_envs(check)
     if not envs:
@@ -37,7 +40,19 @@ def check_run(check, env, rate):
         abort()
 
     environment = create_interface(check, env)
+    config = deepcopy(environment.config)
+    interactive = False
 
-    environment.run_check(rate=rate)
+    if debug is not None:
+        interactive = True
+        config.setdefault('init_config', {})
+        if debug:
+            config['init_config']['debug_check'] = 'start'
+        else:
+            config['init_config']['debug_check'] = 'end'
+
+    with environment.use_config(config):
+        environment.run_check(interactive=interactive, rate=rate)
+
     echo_success('Note: ', nl=False)
     echo_info('If some metrics are missing, you may want to try again with the -r / --rate flag.')

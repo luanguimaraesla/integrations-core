@@ -2,6 +2,7 @@
 # All rights reserved
 # Licensed under a 3-clause BSD style license (see LICENSE)
 import re
+from contextlib import contextmanager
 
 from .agent import DEFAULT_AGENT_VERSION, FAKE_API_KEY, get_agent_exe, get_agent_conf_dir, get_rate_flag
 from .config import (
@@ -15,9 +16,10 @@ MANIFEST_VERSION_PATTERN = r'agent (\d)'
 
 
 class DockerInterface(object):
-    def __init__(self, check, env, config=None, metadata=None, agent_build=None, api_key=None):
+    def __init__(self, check, env, base_package=None, config=None, metadata=None, agent_build=None, api_key=None):
         self.check = check
         self.env = env
+        self.base_package = base_package
         self.config = config or {}
         self.metadata = metadata or {}
         self.agent_build = agent_build
@@ -38,22 +40,44 @@ class DockerInterface(object):
         return '/home/{}'.format(self.check)
 
     @property
+    def base_mount_dir(self):
+        return '/home/datadog_checks_base'
+
+    @property
     def agent_command(self):
         return 'docker exec {} {}'.format(
             self.container_name,
             get_agent_exe(self.agent_version)
         )
 
-    def run_check(self, capture=False, rate=False):
-        command = '{} check {}{}'.format(
-            self.agent_command,
+    def exec_command(self, interactive=False):
+        return 'docker exec{} {}'.format(
+            ' -it' if interactive else '', self.container_name
+        )
+
+    def run_check(self, interactive=False, capture=False, rate=False):
+        command = '{} {} check {}{}'.format(
+            self.exec_command(interactive=interactive),
+            get_agent_exe(self.agent_version),
             self.check,
             ' {}'.format(get_rate_flag(self.agent_version)) if rate else ''
         )
+
         return run_command(command, capture=capture)
 
     def exists(self):
         return env_exists(self.check, self.env)
+
+    @contextmanager
+    def use_config(self, config):
+        if config != self.config:
+            try:
+                write_env_data(self.check, self.env, config, self.metadata)
+                yield
+            finally:
+                self.write_config()
+        else:
+            yield
 
     def remove_config(self):
         remove_env_data(self.check, self.env)
@@ -80,6 +104,12 @@ class DockerInterface(object):
         ]
         run_command(command, capture=True, check=True)
 
+    def update_base_package(self):
+        command = [
+            'docker', 'exec', self.container_name, 'pip', 'install', '-e', self.base_mount_dir
+        ]
+        run_command(command, capture=True, check=True)
+
     def update_agent(self):
         if self.agent_build:
             run_command(['docker', 'pull', self.agent_build], capture=True, check=True)
@@ -101,9 +131,16 @@ class DockerInterface(object):
                 '-v', '{}:{}'.format(self.config_dir, get_agent_conf_dir(self.check, self.agent_version)),
                 # Mount the check directory
                 '-v', '{}:{}'.format(path_join(get_root(), self.check), self.check_mount_dir),
-                # The chosen tag
-                self.agent_build
             ]
+
+            if self.base_package:
+                # Mount the check directory
+                command.append('-v')
+                command.append('{}:{}'.format(self.base_package, self.base_mount_dir))
+
+            # The chosen tag
+            command.append(self.agent_build)
+
             return run_command(command, capture=True)
 
     def stop_agent(self):
